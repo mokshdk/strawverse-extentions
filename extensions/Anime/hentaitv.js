@@ -22,7 +22,10 @@ function solvePoW(challenge) {
   let n = 0;
   while (n < 10000000) {
     const hexN = n.toString(16);
-    const hash = crypto.createHash("sha256").update(challenge + hexN).digest();
+    const hash = crypto
+      .createHash("sha256")
+      .update(challenge + hexN)
+      .digest();
     if (hash[0] === 0) return hexN;
     n++;
   }
@@ -171,9 +174,7 @@ async function resolveNhplayerStream(embedUrl) {
       ),
     ) ||
     r2.data.match(
-      new RegExp(
-        `data-[a-zA-Z0-9]+=\"([a-f0-9]{8})\"[^>]+id=[\"']${id1}[\"']`,
-      ),
+      new RegExp(`data-[a-zA-Z0-9]+=\"([a-f0-9]{8})\"[^>]+id=[\"']${id1}[\"']`),
     );
   const mE2 =
     r2.data.match(
@@ -189,9 +190,7 @@ async function resolveNhplayerStream(embedUrl) {
       ),
     ) ||
     r2.data.match(
-      new RegExp(
-        `data-[a-zA-Z0-9]+=\"([a-f0-9]{8})\"[^>]+id=[\"']${id3}[\"']`,
-      ),
+      new RegExp(`data-[a-zA-Z0-9]+=\"([a-f0-9]{8})\"[^>]+id=[\"']${id3}[\"']`),
     );
   const mE4 = r2.data.match(
     new RegExp(
@@ -331,8 +330,7 @@ async function fetchRecentEpisodes(filters = {}) {
     });
 
     const videos = Array.isArray(res.data?.videos) ? res.data.videos : [];
-    const totalPages =
-      typeof res.data?.pages === "number" ? res.data.pages : 1;
+    const totalPages = typeof res.data?.pages === "number" ? res.data.pages : 1;
     const seenSeries = new Set();
     const results = [];
 
@@ -367,13 +365,105 @@ async function AnimeInfo(id) {
       .trim()
       .replace(/^\/hentai\//, "")
       .replace(/\/$/, "");
-    const res = await client.get(`${baseUrl}/hentai/${cleanId}`, {
+
+    const baseSlug = cleanId.replace(/-episode-\d+.*$/i, "");
+
+    let videos = [];
+    try {
+      const searchRes = await client.get(
+        `${baseUrl}/api/search?q=${encodeURIComponent(cleanId)}&limit=20`,
+        {
+          headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+          timeout: 10000,
+        },
+      );
+      if (Array.isArray(searchRes.data?.videos)) {
+        videos = searchRes.data.videos;
+      }
+    } catch (_) {}
+
+    if (videos.length === 0 && baseSlug !== cleanId) {
+      try {
+        const searchRes = await client.get(
+          `${baseUrl}/api/search?q=${encodeURIComponent(baseSlug)}&limit=20`,
+          {
+            headers: {
+              Accept: "application/json",
+              "User-Agent": "Mozilla/5.0",
+            },
+            timeout: 10000,
+          },
+        );
+        if (Array.isArray(searchRes.data?.videos)) {
+          videos = searchRes.data.videos;
+        }
+      } catch (_) {}
+    }
+
+    if (videos.length === 0) {
+      try {
+        const searchRes = await client.get(
+          `${baseUrl}/api/search?q=${encodeURIComponent(baseSlug.replace(/-/g, " "))}&limit=20`,
+          {
+            headers: {
+              Accept: "application/json",
+              "User-Agent": "Mozilla/5.0",
+            },
+            timeout: 10000,
+          },
+        );
+        if (Array.isArray(searchRes.data?.videos)) {
+          videos = searchRes.data.videos;
+        }
+      } catch (_) {}
+    }
+
+    const matched =
+      videos.find((v) => v.titleSlug === cleanId || v.slug === cleanId) ||
+      videos.find(
+        (v) =>
+          v.titleSlug === baseSlug ||
+          v.slug === baseSlug ||
+          v.slug?.startsWith(baseSlug + "-"),
+      ) ||
+      videos[0];
+
+    if (matched) {
+      return {
+        id: cleanId,
+        title: matched.title || cleanId.replace(/-/g, " "),
+        image: normalizeUrl(
+          matched.cover || matched.featureImage || matched.thumb,
+        ),
+        description: matched.description || "",
+        genres: Array.isArray(matched.tags) ? matched.tags : [],
+        status: "Completed",
+        aired: matched.year
+          ? String(matched.year)
+          : matched.releasedAt
+            ? matched.releasedAt.slice(0, 4)
+            : "",
+        type: "Hentai",
+      };
+    }
+
+    const targetSlug = cleanId.includes("-episode-")
+      ? cleanId
+      : `${cleanId}-episode-1`;
+
+    const res = await client.get(`${baseUrl}/hentai/${targetSlug}`, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
       timeout: 12000,
+      maxRedirects: 5,
     });
+
+    const finalUrl = res.request?.res?.responseUrl || res.config?.url || "";
+    if (finalUrl && finalUrl.endsWith("/") && !finalUrl.includes("/hentai/")) {
+      throw new Error("Redirected to homepage");
+    }
 
     const html = res.data;
     const chunks = [];
@@ -388,21 +478,28 @@ async function AnimeInfo(id) {
     }
     const full = chunks.join("");
 
-    let title = cleanId;
+    let title = cleanId.replace(/-/g, " ");
     let image = null;
     let description = "";
     let genres = [];
-    let status = "Completed";
 
     const mVideo = full.match(/\"video\":(\{.*?\})/);
     if (mVideo) {
       try {
         const v = JSON.parse(mVideo[1]);
-        if (v.title) title = v.title;
-        if (v.cover || v.featureImage)
-          image = normalizeUrl(v.cover || v.featureImage);
-        if (v.description) description = v.description;
-        if (Array.isArray(v.tags)) genres = v.tags;
+        if (
+          v &&
+          (v.titleSlug === cleanId ||
+            v.titleSlug === baseSlug ||
+            v.slug === cleanId ||
+            v.slug?.startsWith(baseSlug))
+        ) {
+          if (v.title) title = v.title;
+          if (v.cover || v.featureImage)
+            image = normalizeUrl(v.cover || v.featureImage);
+          if (v.description) description = v.description;
+          if (Array.isArray(v.tags)) genres = v.tags;
+        }
       } catch (_) {}
     }
 
@@ -417,12 +514,15 @@ async function AnimeInfo(id) {
       image: image,
       description: description,
       genres: genres,
-      status: status,
+      status: "Completed",
     };
   } catch (err) {
+    const formattedTitle = String(id || "")
+      .replace(/-/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
     return {
       id: id,
-      title: id,
+      title: formattedTitle || id,
       image: null,
       description: "",
       genres: [],
@@ -441,21 +541,66 @@ async function fetchEpisode(id, page = 1) {
       .replace(/^\/hentai\//, "")
       .replace(/\/$/, "");
 
-    const searchRes = await client.get(
-      `${baseUrl}/api/search?q=${encodeURIComponent(cleanId.replace(/-/g, " "))}&limit=20`,
-      {
-        headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
-        timeout: 10000,
-      },
-    );
+    const baseSlug = cleanId.replace(/-episode-\d+.*$/i, "");
 
-    const videos = Array.isArray(searchRes.data?.videos)
-      ? searchRes.data.videos
-      : [];
+    let videos = [];
+    try {
+      const searchRes = await client.get(
+        `${baseUrl}/api/search?q=${encodeURIComponent(cleanId)}&limit=20`,
+        {
+          headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+          timeout: 10000,
+        },
+      );
+      if (Array.isArray(searchRes.data?.videos)) {
+        videos = searchRes.data.videos;
+      }
+    } catch (_) {}
+
+    if (videos.length === 0 && baseSlug !== cleanId) {
+      try {
+        const searchRes = await client.get(
+          `${baseUrl}/api/search?q=${encodeURIComponent(baseSlug)}&limit=20`,
+          {
+            headers: {
+              Accept: "application/json",
+              "User-Agent": "Mozilla/5.0",
+            },
+            timeout: 10000,
+          },
+        );
+        if (Array.isArray(searchRes.data?.videos)) {
+          videos = searchRes.data.videos;
+        }
+      } catch (_) {}
+    }
+
+    if (videos.length === 0) {
+      try {
+        const searchRes = await client.get(
+          `${baseUrl}/api/search?q=${encodeURIComponent(baseSlug.replace(/-/g, " "))}&limit=20`,
+          {
+            headers: {
+              Accept: "application/json",
+              "User-Agent": "Mozilla/5.0",
+            },
+            timeout: 10000,
+          },
+        );
+        if (Array.isArray(searchRes.data?.videos)) {
+          videos = searchRes.data.videos;
+        }
+      } catch (_) {}
+    }
+
     const matchingVideos = videos.filter(
       (v) =>
-        (v.titleSlug && v.titleSlug === cleanId) ||
-        (v.slug && v.slug.startsWith(cleanId)),
+        (v.titleSlug &&
+          (v.titleSlug === cleanId || v.titleSlug === baseSlug)) ||
+        (v.slug &&
+          (v.slug === cleanId ||
+            v.slug.startsWith(baseSlug + "-") ||
+            v.slug.startsWith(cleanId + "-"))),
     );
 
     let episodes = [];
@@ -471,7 +616,7 @@ async function fetchEpisode(id, page = 1) {
     } else {
       episodes = [
         {
-          id: cleanId,
+          id: cleanId.includes("-episode-") ? cleanId : `${cleanId}-episode-1`,
           number: 1,
           title: "Episode 1",
           duration: "Unknown",
@@ -501,21 +646,60 @@ async function fetchEpisodeSources(episodeId, category = null) {
       .replace(/\/$/, "");
 
     let embedUrl = null;
-    const res = await client.get(`${baseUrl}/hentai/${cleanEp}`, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-      timeout: 12000,
-    });
 
-    const mIframe = res.data.match(
-      /<iframe[^>]+src=\"(https:\/\/nhplayer\.com\/v\/[^\"]+)\"/,
-    );
-    if (mIframe) {
-      embedUrl = mIframe[1];
-    } else {
-      const mEmbed = res.data.match(
-        /\"embedUrl\":\s*\"(https:\/\/nhplayer\.com\/v\/[^\"]+)\"/,
+    try {
+      const searchRes = await client.get(
+        `${baseUrl}/api/search?q=${encodeURIComponent(cleanEp)}&limit=10`,
+        {
+          headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+          timeout: 8000,
+        },
       );
-      if (mEmbed) embedUrl = mEmbed[1];
+      const v = (searchRes.data?.videos || []).find(
+        (x) => x.slug === cleanEp || x.id === cleanEp,
+      );
+      if (v?.embedUrl) {
+        embedUrl = v.embedUrl;
+      }
+    } catch (_) {}
+
+    if (!embedUrl) {
+      const targetSlug = cleanEp.includes("-episode-")
+        ? cleanEp
+        : `${cleanEp}-episode-1`;
+
+      let res;
+      try {
+        res = await client.get(`${baseUrl}/hentai/${targetSlug}`, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          },
+          timeout: 12000,
+        });
+      } catch (_) {
+        if (targetSlug !== cleanEp) {
+          res = await client.get(`${baseUrl}/hentai/${cleanEp}`, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            },
+            timeout: 12000,
+          });
+        }
+      }
+
+      if (res?.data) {
+        const mIframe = res.data.match(
+          /<iframe[^>]+src=\"(https:\/\/nhplayer\.com\/v\/[^\"]+)\"/,
+        );
+        if (mIframe) {
+          embedUrl = mIframe[1];
+        } else {
+          const mEmbed = res.data.match(
+            /\"embedUrl\":\s*\"(https:\/\/nhplayer\.com\/v\/[^\"]+)\"/,
+          );
+          if (mEmbed) embedUrl = mEmbed[1];
+        }
+      }
     }
 
     if (!embedUrl) {
@@ -559,7 +743,7 @@ async function fetchEpisodeSources(episodeId, category = null) {
 
 module.exports = {
   name: "hentaitv",
-  version: "1.0.0",
+  version: "1.1.0",
   baseUrl,
   headerRules: [
     {
